@@ -15,7 +15,7 @@ alpha <- runif(k, 0.5, 2) # discrimination parameter
 beta <- runif(k, -2, 3) # difficulty parameter
 
 theta_mu <- 0 # mean person ability
-theta_sig <- 1 # sd person ability
+theta_sig <- 1 # sd person ability#
 
 theta <- rnorm(n, theta_mu, theta_sig) # generate 30 ability parameters
 
