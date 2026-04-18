@@ -1,3 +1,6 @@
+source('./projects/lssn/2pl_sim_functions.R')
+
+
 n <- 1000
 items <- 30
 
