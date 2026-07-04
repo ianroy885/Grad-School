@@ -19,4 +19,5 @@ sim_data <- apply(p_endorse, 2, function(x){
   )
 })
 
+get_params(sim_data)
 
