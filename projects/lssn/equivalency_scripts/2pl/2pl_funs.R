@@ -175,7 +175,7 @@ get_params <- function(input_data, max_iter = 500, tolerance = 1e-6){
       model_params <- optim(
         par = c(alpha_old[k], beta_old[k]), # want to grab the alpas and betas for that item
         fn = ll_bern_item, # minimize log likelihood
-        X_i = input_data[,k], # one item at a time
+        X_j = input_data[,k], # one item at a time
         theta = thetas,
         method = "BFGS",
         control = list(maxit = 200)
@@ -203,7 +203,7 @@ get_params <- function(input_data, max_iter = 500, tolerance = 1e-6){
         beta = betas,
         method = "BFGS",
         control = list(maxit = 200)
-      )
+      )$par[1]
     }
     
     delta <- max(c((alphas - alpha_old),(betas - beta_old)))
@@ -217,4 +217,8 @@ get_params <- function(input_data, max_iter = 500, tolerance = 1e-6){
   
   
 }
+
 finally <- get_params(sim_data)
+
+
+finally$theta
