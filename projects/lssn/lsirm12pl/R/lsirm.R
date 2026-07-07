@@ -1,0 +1,2937 @@
+#' Fit a LSIRM ( Latent Space Item Response Model)
+#'
+#' @description
+#' \link{lsirm} is used to fit 1PL LSIRM, 2PL LSIRM, and ordinal GRM LSIRM using Bayesian methods.
+#'
+#' @param formula The form of formula is \code{lsirm(A ~ <term 1>(<term 2>, <term 3> ...))}, where \code{A} is an item response matrix to be analyzed, \code{<term1>} is the model you want to fit and has one of the following values: "lsirm1pl", "lsirm2pl", "lsirmgrm", and "lsirmgrm2pl"., and \code{<term 2>}, \code{<term 3>}, etc. are each option for the model.
+#' @param ... Additional arguments for the corresponding function.
+#'
+#' @details
+#' The descriptions of options for each model, such as \code{<term 2>} and \code{<term 3>}, are included in \code{\link{lsirm1pl}} for 1PL LSIRM, \code{\link{lsirm2pl}} for 2PL LSIRM, and \code{\link{lsirmgrm}} for ordinal GRM LSIRM.
+#'
+#' @return \code{lsirm} returns an object of class \code{list}.
+#'
+#' See corresponding functions such as \code{\link{lsirm1pl}} for 1PL LSIRM and \code{\link{lsirm2pl}} for 2PL LSIRM.
+#'
+#' @seealso
+#' \code{\link{lsirm1pl}} for 1PL LSIRM.
+#'
+#' \code{\link{lsirm2pl}} for 2PL LSIRM.
+#'
+#' \code{\link{lsirmgrm}} for ordinal GRM LSIRM.
+#' @examples
+#' \donttest{
+#' # generate example item response matrix
+#' data     <- matrix(rbinom(500, size = 1, prob = 0.5),ncol=10,nrow=50)
+#'
+#' lsirm_result <- lsirm(data~lsirm1pl())
+#' lsirm_result <- lsirm(data~lsirm2pl())
+#'
+#' # Realistic example with BFPT data
+#' data(BFPT)
+#' dat <- BFPT
+#' dat[(dat == 0) | (dat == 6)] <- NA
+#' reverse <- c(2, 4, 6, 8, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 23, 25, 27, 32, 34, 36, 42, 44, 46)
+#' dat[, reverse] <- 6 - dat[, reverse]
+#' dat <- dat[complete.cases(dat), ]
+#' # Fit model (subset for speed)
+#' fit_bfpt <- lsirm(dat[1:50, 1:10] ~ lsirmgrm(niter = 1000, nburn = 500))
+#' summary(fit_bfpt)
+#'
+#' # Fit with adaptive MCMC
+#' lsirm_result <- lsirm(data~lsirm1pl(adapt = list(use_adapt = TRUE)))
+#'
+#' }
+#' @export
+lsirm = function(formula, ...) UseMethod("lsirm")
+
+
+
+#' Formula function for LSIRM
+#'
+#' @description \link{lsirm.formula} is formula object.
+#'
+#' @param formula The form of formula is \code{lsirm(A ~ <term 1>(<term 2>, <term 3> ...))}, where \code{A} is an item response matrix to be analyzed, \code{<term1>} is the model you want to fit and has one of the following values: "lsirm1pl", "lsirm2pl", "lsirmgrm", and "lsirmgrm2pl"., and \code{<term 2>}, \code{<term 3>}, etc., are each option for the model.
+#' @param ... Additional arguments for the corresponding function.
+#'
+#' @export
+lsirm.formula = function(formula, ...){
+  env <- environment(formula)
+  data <- eval(formula[[2]], envir = env)
+  
+  call_obj <- formula[[3]]
+  func <- as.character(call_obj[[1]])
+  argument <- rlang::call_args(call_obj)
+  argument$data <- data
+  
+  output <- do.call(func, argument)
+  
+  if((!is.null(argument$chains)) && (output$chains > 1)){
+    for(i in 1:argument$chains){
+      output[[i]]$call <- match.call()
+      class(output[[i]]) <- "lsirm"
+    }
+  }else{
+    output$call <- match.call()
+    class(output) <- "lsirm"
+  }
+  return(output)
+}
+
+
+
+
+
+#' Fit a 1PL LSIRM for binary and continuous item response data
+#' @description
+#' \code{\link{lsirm1pl}} integrates all functions related to 1PL LSIRM. Various 1PL LSIRM function can be used by setting the \code{spikenslab}, \code{fixed_gamma}, and \code{missing_data} arguments.
+#'
+#' This function can be used regardless of the data type, providing a unified approach to model fitting.
+#'
+#'
+#' @param data Matrix; a binary or continuous item response matrix for analysis. Each row represents a respondent, and each column contains responses to the corresponding item.
+#' @param spikenslab Logical; specifies whether to use a model selection approach. Default is FALSE.
+#' @param fixed_gamma Logical; indicates whether to fix gamma at 1. Default is FALSE.
+#' @param missing_data Character; the type of missing data assumed. Options are NA, "mar", or "mcar". Default is NA.
+#' @param chains Integer; the number of MCMC chains to run. Default is 1.
+#' @param multicore Integer; the number of cores to use for parallel execution. Default is 1.
+#' @param seed Integer; the seed number for MCMC fitting. Default is NA.
+#' @param ndim Integer; the dimension of the latent space. Default is 2.
+#' @param niter Integer; the total number of MCMC iterations to run. Default is 15000.
+#' @param nburn Integer; the number of initial MCMC iterations to discard as burn-in. Default is 2500.
+#' @param nthin Integer; the number of MCMC iterations to thin. Default is 5.
+#' @param nprint Integer; the interval at which MCMC samples are displayed during execution. Default is 500.
+#' @param jump_beta Numeric; the jumping rule for the beta proposal density. Default is 0.4.
+#' @param jump_theta Numeric; the jumping rule for the theta proposal density. Default is 1.
+#' @param jump_z Numeric; the jumping rule for the z proposal density. Default is 0.5.
+#' @param jump_w Numeric; the jumping rule for the w proposal density. Default is 0.5.
+#' @param pr_mean_beta Numeric; the mean of the normal prior for beta. Default is 0.
+#' @param pr_sd_beta Numeric; the standard deviation of the normal prior for beta. Default is 1.
+#' @param pr_mean_theta Numeric; the mean of the normal prior for theta. Default is 0.
+#' @param pr_sd_theta Numeric; the standard deviation of the normal prior for theta. Default is 1.
+#' @param pr_a_theta Numeric; the shape parameter of the inverse gamma prior for the variance of theta. Default is 0.001.
+#' @param pr_b_theta Numeric; the scale parameter of the inverse gamma prior for the variance of theta. Default is 0.001.
+#' @param jump_gamma Numeric; the jumping rule for the gamma proposal density. Default is 0.2.
+#' @param pr_mean_gamma Numeric; mean of log normal prior for gamma. Default is 0.5.
+#' @param pr_sd_gamma Numeric; standard deviation of log normal prior for gamma. Default is 1.
+#' @param verbose Logical; If TRUE, MCMC samples are printed for each \code{nprint}. Default is FALSE.
+#' @param fix_theta_sd Logical; If TRUE, the standard deviation of the theta parameter is fixed. Default is FALSE.
+#' @param adapt List; optional adaptive MCMC control. If not \code{NULL}, proposal standard deviations are adapted during the burn-in period to reach a target acceptance rate and are held fixed during the main MCMC sampling.
+#'   When adaptation is enabled, the reported acceptance ratios in the output (\code{accept_beta}, \code{accept_theta}, etc.) are computed only from iterations after burn-in, reflecting the performance of the adapted proposal distributions.
+#'   Elements of the list can include:
+#'   \itemize{
+#'     \item \code{use_adapt}: Logical; if \code{TRUE}, adaptive MCMC is used. Default is \code{FALSE}.
+#'     \item \code{adapt_interval}: Integer; the number of iterations between each update of the proposal SDs. Default is \code{100}.
+#'     \item \code{adapt_rate}: Numeric; Robbins-Monro scaling constant (c) in step size formula: adapt_rate / iteration^decay_rate. Default is \code{1.0}. Valid range: any positive value. Recommended: 0.5-2.0.
+#'     \item \code{decay_rate}: Numeric; Robbins-Monro decay exponent (alpha) in step size formula. Default is \code{0.5}. Valid range: (0.5, 1]. Recommended: 0.5-0.8.
+#'     \item \code{target_accept}: Numeric; target acceptance rate for scalar parameters (beta, theta, gamma, alpha). Default is \code{0.44}.
+#'     \item \code{target_accept_zw}: Numeric; target acceptance rate for multi-dimensional latent positions z and w. Default is \code{0.234}.
+#'     \item \code{target_accept_beta/theta/gamma}: Numeric; (optional) parameter-specific target acceptance rates to override \code{target_accept}.
+#'   }
+#' @param \dots Additional arguments passed to the underlying model-fitting functions.
+#'
+#' @return \code{lsirm1pl} returns an object of list.
+#' The basic return list containing the following components:
+#' \item{data}{A data frame or matrix containing the variables used in the model.}
+#' \item{bic}{A numeric value representing the Bayesian Information Criterion (BIC).}
+#' \item{mcmc_inf}{Details about the number of MCMC iterations, burn-in periods, and thinning intervals.}
+#' \item{map_inf}{The log maximum a posteriori (MAP) value and the iteration number at which this MAP value occurs.}
+#' \item{beta_estimate}{Posterior estimates of the beta parameter.}
+#' \item{theta_estimate}{Posterior estimates of the theta parameter.}
+#' \item{sigma_theta_estimate}{Posterior estimates of the standard deviation of theta.}
+#' \item{z_estimate}{Posterior estimates of the z parameter.}
+#' \item{w_estimate}{Posterior estimates of the w parameter.}
+#' \item{beta}{Posterior samples of the beta parameter.}
+#' \item{theta}{Posterior samples of the theta parameter.}
+#' \item{theta_sd}{Posterior samples of the standard deviation of theta.}
+#' \item{z}{Posterior samples of the z parameter, represented as a 3-dimensional matrix where the last axis denotes the dimension of the latent space.}
+#' \item{w}{Posterior samples of the w parameter, represented as a 3-dimensional matrix where the last axis denotes the dimension of the latent space.}
+#' \item{accept_beta}{Acceptance ratio for the beta parameter.}
+#' \item{accept_theta}{Acceptance ratio for the theta parameter.}
+#' \item{accept_z}{Acceptance ratio for the z parameter.}
+#' \item{accept_w}{Acceptance ratio for the w parameter.}
+#' \item{...}{Additional return values for various settings. Refer to the functions in the Details.}
+#'
+#' @details
+#'  Additional arguments and return values for each function are documented in the respective function's description.
+#'
+#' * For LSIRM with data included missing value are detailed in \link{lsirm1pl_mar} and \link{lsirm1pl_mcar}.
+#'
+#' * For LSIRM using the spike-and-slab model selection approach are detailed in \link{lsirm1pl_ss}.
+#'
+#' * For continuous version of LSIRM are detailed in \link{lsirm1pl_normal_o}.
+#'
+#' @note If both \code{spikenslab} and \code{fixed_gamma} are set \code{TRUE}, it returns error because both are related to \code{gamma}.
+#'
+#' @seealso
+#' The LSIRM for 1PL LSIRM for binary item response data as following:
+#'
+#' \code{\link{lsirm1pl_o}}, \code{\link{lsirm1pl_fixed_gamma}}, \code{\link{lsirm1pl_mar}},\code{\link{lsirm1pl_mcar}}, \code{\link{lsirm1pl_fixed_gamma_mar}}, \code{\link{lsirm1pl_fixed_gamma_mcar}}, \code{\link{lsirm1pl_ss}}, \code{\link{lsirm1pl_mar_ss}}, and \code{\link{lsirm1pl_mcar_ss}}
+#'
+#' The LSIRM for 1PL LSIRM for continuous item response data as following:
+#'
+#' \code{\link{lsirm1pl_normal_o}}, \code{\link{lsirm1pl_normal_fixed_gamma}}, \code{\link{lsirm1pl_normal_mar}},  \code{\link{lsirm1pl_normal_mcar}},\code{\link{lsirm1pl_normal_fixed_gamma_mar}}, \code{\link{lsirm1pl_normal_fixed_gamma_mcar}}, \code{\link{lsirm1pl_normal_ss}}, \code{\link{lsirm1pl_normal_mar_ss}}, \code{\link{lsirm1pl_normal_mcar_ss}}
+#'
+#' @details
+#' For 1PL LSIRM with binary item response data, the probability of correct response by respondent \eqn{j} to item \eqn{i} with item effect \eqn{\beta_i}, respondent effect \eqn{\theta_j} and the distance between latent position \eqn{w_i} of item \eqn{i} and latent position \eqn{z_j} of respondent \eqn{j} in the shared metric space, with \eqn{\gamma} represents the weight of the distance term: \deqn{logit(P(Y_{j,i} = 1|\theta_j,\beta_i,\gamma,z_j,w_i))=\theta_j+\beta_i-\gamma||z_j-w_i||}
+#'
+#' For 1PL LSIRM with continuous item response data, the continuous value of response by respondent \eqn{j} to item \eqn{i} with item effect \eqn{\beta_i}, respondent effect \eqn{\theta_j} and the distance between latent position \eqn{w_i} of item \eqn{i} and latent position \eqn{z_j} of respondent \eqn{j} in the shared metric space, with \eqn{\gamma} represents the weight of the distance term: \deqn{Y_{j,i} = \theta_j+\beta_i-\gamma||z_j-w_i|| + e_{j,i}} where the error \eqn{e_{j,i} \sim N(0,\sigma^2)}.
+#'
+#'@examples
+#' \donttest{
+#' # generate example item response matrix
+#' data     <- matrix(rbinom(500, size = 1, prob = 0.5),ncol=10,nrow=50)
+#' lsirm_result <- lsirm1pl(data)
+#'
+#'# The code following can achieve the same result.
+#' lsirm_result <- lsirm(data~lsirm1pl())
+#'
+#' # Fit with adaptive MCMC
+#' lsirm_result <- lsirm1pl(data, adapt = list(use_adapt = TRUE))
+#'
+#' }
+#' @export
+lsirm1pl = function(data, spikenslab = FALSE, fixed_gamma = FALSE, missing_data = NA, chains = 1, multicore = 1, seed = NA,
+                    ndim = 2, niter = 15000, nburn = 2500, nthin = 5, nprint = 500, jump_beta = 0.4, jump_theta = 1, jump_gamma = 0.2, jump_z = 0.5, jump_w = 0.5,
+                    pr_mean_beta = 0, pr_sd_beta = 1, pr_mean_theta = 0, pr_sd_theta = 1, pr_mean_gamma = 0.5, pr_sd_gamma = 1, pr_a_theta = 0.001, pr_b_theta = 0.001, verbose = FALSE, fix_theta_sd = FALSE, adapt = NULL, ...) {
+
+  if(!is.na(seed)){
+    set.seed(seed)
+  }
+  cat("\n Fitting LSIRM with MCMC algorithm\n")
+  if(spikenslab == FALSE & fixed_gamma == FALSE & is.na(missing_data) == TRUE){
+    if(sum(is.na(data)) > 0){
+      stop("The data contains NA. Set missing_data to 'mcar' or 'mar'.")
+    }
+    if(check.datatype(data, ...)){ # if missing.val imputed
+      ####lsirm1pl_o -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                      jump_beta = jump_beta, jump_theta = jump_theta, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                                      pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                      pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, verbose = verbose, fix_theta_sd = fix_theta_sd, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,                                       pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, verbose = verbose, fix_theta_sd = fix_theta_sd, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,                                       pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, verbose = verbose, fix_theta_sd = fix_theta_sd, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    } else{
+      ####lsirm1pl_normal_o -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_o(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta, jump_gamma=jump_gamma,
+                                             jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                                             pr_mean_gamma=pr_mean_gamma, pr_sd_gamma=pr_sd_gamma, pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, verbose=verbose, fix_theta_sd = fix_theta_sd, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_o(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta, jump_gamma=jump_gamma,
+                                                                                               jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                                                                                               pr_mean_gamma=pr_mean_gamma, pr_sd_gamma=pr_sd_gamma, pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, verbose=verbose, fix_theta_sd = fix_theta_sd, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_o(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta, jump_gamma=jump_gamma,
+                                    jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                                    pr_mean_gamma=pr_mean_gamma, pr_sd_gamma=pr_sd_gamma, pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, verbose=verbose, fix_theta_sd = fix_theta_sd, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == FALSE & missing_data == 'mar'){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_mar(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta,
+                                        jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                                        pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, fix_theta_sd = fix_theta_sd, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("\n\n Chain %d / %d completed \n\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_mar(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta,
+                                                                                          jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                                                                                          pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, fix_theta_sd = fix_theta_sd, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_mar(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta,
+                               jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                               pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, ...)
+        output$dtype <- "binary"
+
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm1pl_normal_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_mar(data=data, ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint, jump_beta=jump_beta, jump_theta=jump_theta,
+                                               jump_z=jump_z, jump_w=jump_w, pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                                               pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                 jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                 pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                 pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                      jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                      pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                      pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == FALSE & missing_data == 'mcar'){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    } else{
+      ####lsirm1pl_normal_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == TRUE & is.na(missing_data) == TRUE){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_fixed_gamma -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm1pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    } else{
+      ####lsirm1pl_normal_fixed_gamma -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,  
+                                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == TRUE & missing_data == 'mar'){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_fixed_gamma_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                    jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                    pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                    pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm1pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                      jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                      pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                      pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm1pl_normal_fixed_gamma_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                             jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                             pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                             pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == FALSE & fixed_gamma == TRUE & missing_data == 'mcar'){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_fixed_gamma_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                     jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                     pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                     pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm1pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                            jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                            pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                            pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm1pl_normal_fixed_gamma_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                            jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                            pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                            pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                                                                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                   jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                   pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                   pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == TRUE & fixed_gamma == FALSE & is.na(missing_data) == TRUE){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm1pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm1pl_normal_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                     jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                     pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                     pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == TRUE & fixed_gamma == FALSE & missing_data == 'mar'){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_mar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm1pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                             jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                             pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                             pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm1pl_normal_mar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                    jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                    pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                    pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == TRUE & fixed_gamma == FALSE & missing_data == 'mcar'){
+    if(check.datatype(data, ...)){
+      ####lsirm1pl_mcar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                            jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                            pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                            pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm1pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                                                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                   jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                   pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                   pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm1pl_normal_mcar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm1pl_normal_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                   jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                   pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                   pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm1pl_normal_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                     jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                     pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                     pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm1pl_normal_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                          jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                          pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                          pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else{
+    stop('The options "spikenslab" and "fixed_gamma" cannot be set TRUE at the same time.')
+  }
+  if(chains > 1){
+    for(i in 1:chains){
+      output[[i]]$call <- match.call()
+      output[[i]]$method <- "lsirm1pl"
+      output[[i]]$missing <- missing_data
+      output[[i]]$varselect <- spikenslab
+      output[[i]]$chains = chains
+      class(output[[i]]) <- "lsirm"
+    }
+    
+    # Add chain names for easier access
+    names(output) <- paste0("chain", 1:chains)
+    
+    # Add overall method and chains info to the main list
+    output$method <- "lsirm1pl"
+    output$chains <- chains
+    class(output) <- "lsirm"
+  }else{
+    output$call <- match.call()
+    output$method <- "lsirm1pl"
+    output$missing <- missing_data
+    output$varselect <- spikenslab
+    output$chains = chains
+    class(output) <- "lsirm"
+  }
+  return(output)
+}
+
+
+
+#'  Fit a 2pl LSIRM for binary and continuous item resopnse data
+#'
+#' @description
+#' \code{\link{lsirm2pl}} integrates all functions related to 2PL LSIRM. Various 2PL LSIRM function can be used by setting the \code{spikenslab}, \code{fixed_gamma}, and \code{missing_data} arguments.
+#'
+#' This function can be used regardless of the data type, providing a unified approach to model fitting.
+#'
+#' @param data Matrix; a binary or continuous item response matrix for analysis. Each row represents a respondent, and each column contains responses to the corresponding item.
+#' @param spikenslab Logical; specifies whether to use a model selection approach. Default is FALSE.
+#' @param fixed_gamma Logical; indicates whether to fix gamma at 1. Default is FALSE.
+#' @param missing_data Character; the type of missing data assumed. Options are NA, "mar", or "mcar". Default is NA.
+#' @param chains Integer; the number of MCMC chains to run. Default is 1.
+#' @param multicore Integer; the number of cores to use for parallel execution. Default is 1.
+#' @param seed Integer; the seed number for MCMC fitting. Default is NA.
+#' @param ndim Integer; the dimension of the latent space. Default is 2.
+#' @param niter Integer; the total number of MCMC iterations to run. Default is 15000.
+#' @param nburn Integer; the number of initial MCMC iterations to discard as burn-in. Default is 2500.
+#' @param nthin Integer; the number of MCMC iterations to thin. Default is 5.
+#' @param nprint Integer; the interval at which MCMC samples are displayed during execution. Default is 500.
+#' @param jump_beta Numeric; the jumping rule for the beta proposal density. Default is 0.4.
+#' @param jump_theta Numeric; the jumping rule for the theta proposal density. Default is 1.
+#' @param jump_alpha Numeric; the jumping rule for the alpha proposal density. Default is 1.
+#' @param jump_gamma Numeric; the jumping rule for the gamma proposal density. Default is 0.2.
+#' @param jump_z Numeric; the jumping rule for the z proposal density. Default is 0.5.
+#' @param jump_w Numeric; the jumping rule for the w proposal density. Default is 0.5.
+#' @param pr_mean_beta Numeric; the mean of the normal prior for beta. Default is 0.
+#' @param pr_sd_beta Numeric; the standard deviation of the normal prior for beta. Default is 1.
+#' @param pr_mean_theta Numeric; the mean of the normal prior for theta. Default is 0.
+#' @param pr_sd_theta Numeric; the standard deviation of the normal prior for theta. Default is 1.
+#' @param pr_mean_gamma Numeric; mean of log normal prior for gamma. Default is 0.5.
+#' @param pr_sd_gamma Numeric; standard deviation of log normal prior for gamma. Default is 1.
+#' @param pr_mean_alpha Numeric; the mean of the log normal prior for alpha. Default is 0.5.
+#' @param pr_sd_alpha Numeric; the standard deviation of the log normal prior for alpha. Default is 1.
+#' @param pr_a_theta Numeric; the shape parameter of the inverse gamma prior for the variance of theta. Default is 0.001.
+#' @param pr_b_theta Numeric; the scale parameter of the inverse gamma prior for the variance of theta. Default is 0.001.
+#' @param fix_theta_sd Logical; If TRUE, the standard deviation of the theta parameter is fixed. Default is FALSE.
+#' @param fix_alpha_1 Logical; If TRUE, the first element of the alpha parameter is fixed to 1. Default is TRUE.
+#' @param adapt List; optional adaptive MCMC control. If not \code{NULL}, proposal standard deviations are adapted during the burn-in period to reach a target acceptance rate and are held fixed during the main MCMC sampling.
+#'   When adaptation is enabled, the reported acceptance ratios in the output (\code{accept_beta}, \code{accept_theta}, \code{accept_alpha}, etc.) are computed only from iterations after burn-in, reflecting the performance of the adapted proposal distributions.
+#'   Elements of the list can include:
+#'   \itemize{
+#'     \item \code{use_adapt}: Logical; if \code{TRUE}, adaptive MCMC is used. Default is \code{FALSE}.
+#'     \item \code{adapt_interval}: Integer; the number of iterations between each update of the proposal SDs. Default is \code{100}.
+#'     \item \code{adapt_rate}: Numeric; Robbins-Monro scaling constant (c) in step size formula: adapt_rate / iteration^decay_rate. Default is \code{1.0}. Valid range: any positive value. Recommended: 0.5-2.0.
+#'     \item \code{decay_rate}: Numeric; Robbins-Monro decay exponent (alpha) in step size formula. Default is \code{0.5}. Valid range: (0.5, 1]. Recommended: 0.5-0.8.
+#'     \item \code{target_accept}: Numeric; target acceptance rate for scalar parameters (beta, theta, gamma, alpha). Default is \code{0.44}.
+#'     \item \code{target_accept_zw}: Numeric; target acceptance rate for the multi-dimensional latent positions z and w. Default is \code{0.234} (optimal for high dimensions; Roberts, Gelman & Gilks, 1997).
+#'     \item \code{target_accept_beta/theta/alpha/gamma}: Numeric; (optional) parameter-specific target acceptance rates to override \code{target_accept}.
+#'   }
+#' @param \dots Additional arguments passed to the underlying model-fitting functions.
+#'
+#' @return \code{lsirm2pl} returns an object of list.
+#' The basic return list containing the following components:
+#' \item{data}{A data frame or matrix containing the variables used in the model.}
+#' \item{bic}{A numeric value representing the Bayesian Information Criterion (BIC).}
+#' \item{mcmc_inf}{Details about the number of MCMC iterations, burn-in periods, and thinning intervals.}
+#' \item{map_inf}{The log maximum a posteriori (MAP) value and the iteration number at which this MAP value occurs.}
+#' \item{beta_estimate}{Posterior estimates of the beta parameter.}
+#' \item{theta_estimate}{Posterior estimates of the theta parameter.}
+#' \item{sigma_theta_estimate}{Posterior estimates of the standard deviation of theta.}
+#' \item{alpha_estimate}{posterior estimates of alpha parameter..}
+#' \item{gamma_estimate}{Posterior estimates of gamma parameter.}
+#' \item{z_estimate}{Posterior estimates of the z parameter.}
+#' \item{w_estimate}{Posterior estimates of the w parameter.}
+#' \item{beta}{Posterior samples of the beta parameter.}
+#' \item{theta}{Posterior samples of the theta parameter.}
+#' \item{theta_sd}{Posterior samples of the standard deviation of theta.}
+#' \item{alpha}{Posterior samples of the alpha parameter.}
+#' \item{gamma}{Posterior samples of the gamma parameter.}
+#' \item{z}{Posterior samples of the z parameter, represented as a 3-dimensional matrix where the last axis denotes the dimension of the latent space.}
+#' \item{w}{Posterior samples of the w parameter, represented as a 3-dimensional matrix where the last axis denotes the dimension of the latent space.}
+#' \item{accept_beta}{Acceptance ratio for the beta parameter.}
+#' \item{accept_theta}{Acceptance ratio for the theta parameter.}
+#' \item{accept_z}{Acceptance ratio for the z parameter.}
+#' \item{accept_w}{Acceptance ratio for the w parameter.}
+#' \item{accept_alpha}{Acceptance ratio for the alpha parameter.}
+#' \item{accept_gamma}{Acceptance ratio for the gamma parameter.}
+#' \item{...}{Additional return values for various settings. Refer to the functions in the Details.}
+#'
+#' @details
+#' Additional arguments and return values for each function are documented in the respective function's description.
+#'
+#' * For 2PL LSIRM with data included missing value are detailed in \link{lsirm2pl_mar} and \link{lsirm2pl_mcar}.
+#'
+#' * For 2PL LSIRM using the spike-and-slab model selection approach are detailed in \link{lsirm2pl_ss}.
+#'
+#' * For continuous version of 2PL LSIRM are detailed in \link{lsirm2pl_normal_o}.
+#'
+#' @note If both \code{spikenslab} and \code{fixed_gamma} are set \code{TRUE}, it returns error because both are related to \code{gamma}.
+#'
+#' @seealso
+#' The 2PL LSIRM for binary item response data as following:
+#'
+#' \code{\link{lsirm2pl_o}}, \code{\link{lsirm2pl_fixed_gamma}}, \code{\link{lsirm2pl_mar}},\code{\link{lsirm2pl_mcar}}, \code{\link{lsirm2pl_fixed_gamma_mar}}, \code{\link{lsirm2pl_fixed_gamma_mcar}}, \code{\link{lsirm2pl_ss}}, \code{\link{lsirm2pl_mar_ss}}, and \code{\link{lsirm2pl_mcar_ss}}
+#'
+#' The 2PL LSIRM for continuous item response data as following:
+#'
+#' \code{\link{lsirm2pl_normal_o}}, \code{\link{lsirm2pl_normal_fixed_gamma}}, \code{\link{lsirm2pl_normal_mar}},  \code{\link{lsirm2pl_normal_mcar}},\code{\link{lsirm1pl_normal_fixed_gamma_mar}}, \code{\link{lsirm2pl_normal_fixed_gamma_mcar}}, \code{\link{lsirm2pl_normal_ss}}, \code{\link{lsirm2pl_normal_mar_ss}}, \code{\link{lsirm2pl_normal_mcar_ss}}
+#'
+#' @details
+#' For 2PL LSIRM with binary item response data, the probability of correct response by respondent \eqn{j} to item \eqn{i} with item effect \eqn{\beta_i}, respondent effect \eqn{\theta_j} and the distance between latent position \eqn{w_i} of item \eqn{i} and latent position \eqn{z_j} of respondent \eqn{j} in the shared metric space, with \eqn{\gamma} represents the weight of the distance term. For 2pl model, the the item effect is assumed to have additional discrimination parameter \eqn{\alpha_i} multiplied by \eqn{\theta_j}: \deqn{logit(P(Y_{j,i} = 1|\theta_j,\alpha_i,\beta_i,\gamma,z_j,w_i))=\theta_j*\alpha_i+\beta_i-\gamma||z_j-w_i||}
+#'
+#' For 2PL LSIRM with continuous item response data, the continuous value of response by respondent \eqn{j} to item \eqn{i} with item effect \eqn{\beta_i}, respondent effect \eqn{\theta_j} and the distance between latent position \eqn{w_i} of item \eqn{i} and latent position \eqn{z_j} of respondent \eqn{j} in the shared metric space, with \eqn{\gamma} represents the weight of the distance term. For 2pl model, the the item effect is assumed to have additional discrimination parameter \eqn{\alpha_i} multiplied by \eqn{\theta_j}: \deqn{Y_{j,i} = \theta_j+\beta_i-\gamma||z_j-w_i|| + e_{j,i}} where the error \eqn{e_{j,i} \sim N(0,\sigma^2)}
+#'@examples
+#' \donttest{
+#' # generate example item response matrix
+#' data     <- matrix(rbinom(500, size = 1, prob = 0.5),ncol=10,nrow=50)
+#' lsirm_result <- lsirm2pl(data)
+#'
+#'# The code following can achieve the same result.
+#' lsirm_result <- lsirm(data~lsirm2pl())
+#'
+#' # Fit with adaptive MCMC
+#' lsirm_result <- lsirm2pl(data, adapt = list(use_adapt = TRUE))
+#'
+#' }
+#' @export
+lsirm2pl = function(data, spikenslab = FALSE, fixed_gamma = FALSE, missing_data = NA, chains = 1, multicore = 1, seed = NA,
+                    ndim = 2, niter = 15000, nburn = 2500, nthin = 5, nprint = 500, jump_beta = 0.4, jump_theta = 1, jump_alpha = 1, jump_gamma = 0.2, jump_z = 0.5, jump_w = 0.5,
+                    pr_mean_beta = 0, pr_sd_beta = 1, pr_mean_theta = 0, pr_sd_theta = 1, pr_mean_gamma = 0.5, pr_sd_gamma = 1, pr_a_theta = 0.001, pr_b_theta = 0.001,
+                    pr_mean_alpha = 0.5, pr_sd_alpha = 1, fix_theta_sd = FALSE, fix_alpha_1 = TRUE, adapt = NULL, ...) {
+  if(!is.na(seed)){
+    set.seed(seed)
+  }
+  cat("\n Fitting LSIRM with MCMC algorithm\n")
+  if(spikenslab == FALSE & fixed_gamma == FALSE & is.na(missing_data) == TRUE){
+    if(check.datatype(data, ...)){ # if missing.val imputed
+      ####lsirm2pl_o -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                      jump_beta = jump_beta, jump_theta = jump_theta, jump_alpha = jump_alpha, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                                      pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma,
+                                      pr_mean_alpha = pr_mean_alpha, pr_sd_alpha = pr_sd_alpha, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, fix_theta_sd = fix_theta_sd, fix_alpha_1 = fix_alpha_1, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                        jump_beta = jump_beta, jump_theta = jump_theta, jump_alpha = jump_alpha, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                                                                                        pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma,
+                                                                                        pr_mean_alpha = pr_mean_alpha, pr_sd_alpha = pr_sd_alpha, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, fix_theta_sd = fix_theta_sd, fix_alpha_1 = fix_alpha_1, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                             jump_beta = jump_beta, jump_theta = jump_theta, jump_alpha = jump_alpha, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                             pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma,
+                             pr_mean_alpha = pr_mean_alpha, pr_sd_alpha = pr_sd_alpha, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, fix_theta_sd = fix_theta_sd, fix_alpha_1 = fix_alpha_1, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    } else{
+      ####lsirm2pl_normal_o -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                             jump_beta = jump_beta, jump_theta = jump_theta, jump_alpha = jump_alpha, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                                             pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma,
+                                             pr_mean_alpha = pr_mean_alpha, pr_sd_alpha = pr_sd_alpha, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, fix_alpha_1 = fix_alpha_1, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                               jump_beta = jump_beta, jump_theta = jump_theta, jump_alpha = jump_alpha, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                                                                                               pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma,
+                                                                                               pr_mean_alpha = pr_mean_alpha, pr_sd_alpha = pr_sd_alpha, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_o(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                    jump_beta = jump_beta, jump_theta = jump_theta, jump_alpha = jump_alpha, jump_gamma = jump_gamma, jump_z = jump_z, jump_w = jump_w,
+                                    pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, pr_mean_gamma = pr_mean_gamma, pr_sd_gamma = pr_sd_gamma,
+                                    pr_mean_alpha = pr_mean_alpha, pr_sd_alpha = pr_sd_alpha, pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == FALSE & missing_data == 'mar'){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                        jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                        pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                        pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                          jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                          pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                          pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                               jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                               pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta,
+                               pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm2pl_normal_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                               jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                               pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                               pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                 jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                 pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                 pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                      jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                      pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                      pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == FALSE & missing_data == 'mcar'){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta,
+                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    } else{
+      ####lsirm2pl_normal_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,  
+                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == TRUE & is.na(missing_data) == TRUE){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_fixed_gamma -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+    } else{
+      ####lsirm2pl_normal_fixed_gamma -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_fixed_gamma(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+  }else if(spikenslab == FALSE & fixed_gamma == TRUE & missing_data == 'mar'){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_fixed_gamma_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                    jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                    pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                    pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                      jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                      pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                      pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm2pl_normal_fixed_gamma_mar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                             jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                             pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,  
+                                                                                                             pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_fixed_gamma_mar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == FALSE & fixed_gamma == TRUE & missing_data == 'mcar'){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_fixed_gamma_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                     jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                     pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                     pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                            jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                            pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                            pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm2pl_normal_fixed_gamma_mcar -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                            jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                            pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                            pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_fixed_gamma_mcar(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                   jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                   pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                   pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == TRUE & fixed_gamma == FALSE & is.na(missing_data) == TRUE){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                       jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                       pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                       pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm2pl_normal_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                                                                                pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                     jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                     pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                     pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == TRUE & fixed_gamma == FALSE & missing_data == 'mar'){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_mar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                           jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                           pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                           pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                             jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                             pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                             pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm2pl_normal_mar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                  jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                  pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta, 
+                                                  pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                    jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                    pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                    pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_mar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                         jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                         pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                         pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else if(spikenslab == TRUE & fixed_gamma == FALSE & missing_data == 'mcar'){
+    if(check.datatype(data, ...)){
+      ####lsirm2pl_mcar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                            jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                            pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                            pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "binary"
+            cat(sprintf("Chain %d / %d completed\n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          # clusterExport(cl,c("lsirm2pl_o","chunks"))
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                              jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                              pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                              pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            # output <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_o(..., data)},
+            #                               data = data, ..., simplify = F),
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "binary"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                   jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                   pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                   pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "binary"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    } else{
+      ####lsirm2pl_normal_mcar_ss -----------
+      if(chains > 1){
+        if(multicore <= 1){
+          output = list()
+          for(i in 1:chains){
+            output[[i]] <- lsirm2pl_normal_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                   jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                   pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                   pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+            output[[i]]$dtype <- "continuous"
+            cat(sprintf("Chain %d / %d completed \n", i, chains))
+          }
+        }else{
+          if(chains < multicore){
+            stop("Error: The number of chains must not be less than the number of cores. Please adjust the number of chains or cores to optimize parallel processing.")
+          }else{
+            cl <- makeCluster(multicore)
+            if(!is.na(seed)){clusterSetRNGStream(cl, seed)}
+          }
+
+          q <- chains %/% multicore
+          r <- chains %% multicore
+          chunks <- list()
+
+          for(i in 1:q){
+            chunks[[i]] = seq(1,multicore,1)
+          }
+
+          if(r != 0){ chunks[[q+1]] = seq(1,r,1) }
+          output <- list()
+
+          tryCatch(
+            for(c in 1:length(chunks)){
+              X <- chunks[[c]]
+              output[[c]] <- parallel::parSapply(cl, X, function(X,data,...){lsirm2pl_normal_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                                                                                     jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                                                                                     pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                                                                                     pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)},
+                                                 data = data, ..., simplify = F)
+              cat(sprintf("\n Chunk %d / %d processed \n", c, length(chunks)))
+              # cat(sprintf("\n Core %d / %d finished",c,length(chunks)),"\n")
+            },
+            error = function(e){
+              parallel::stopCluster(cl)
+              stop("An error occurred during parallel execution.")
+            }
+          )
+          output <- do.call("c",output)
+
+          for(i in 1:chains){
+            output[[i]]$dtype <- "continuous"
+          }
+          parallel::stopCluster(cl)
+        }
+      }else if(chains == 1){
+        if(chains < multicore){
+          warning("Warning: The number of chains is equal to 1. Please adjust the number of chains or cores to optimize parallel processing.")
+        }
+        output <- lsirm2pl_normal_mcar_ss(data = data, ndim = ndim, niter = niter, nburn = nburn, nthin = nthin, nprint = nprint,
+                                          jump_beta = jump_beta, jump_theta = jump_theta, jump_z = jump_z, jump_w = jump_w,
+                                          pr_mean_beta = pr_mean_beta, pr_sd_beta = pr_sd_beta, pr_mean_theta = pr_mean_theta, pr_sd_theta = pr_sd_theta,
+                                          pr_a_theta = pr_a_theta, pr_b_theta = pr_b_theta, ...)
+        output$dtype <- "continuous"
+      }else{
+        stop("The number of chains must be an integer greater than 1.")
+      }
+
+    }
+
+  }else{
+    stop('The options "spikenslab" and "fixed_gamma" cannot be set TRUE at the same time.')
+  }
+  if(chains > 1){
+    for(i in 1:chains){
+      output[[i]]$call <- match.call()
+      output[[i]]$method <- "lsirm2pl"
+      output[[i]]$missing <- missing_data
+      output[[i]]$varselect <- spikenslab
+      output[[i]]$chains = chains
+      class(output[[i]]) <- "lsirm"
+    }
+    
+    # Add chain names for easier access
+    names(output) <- paste0("chain", 1:chains)
+    
+    # Add overall method and chains info to the main list
+    output$method <- "lsirm2pl"
+    output$chains <- chains
+    class(output) <- "lsirm"
+  }else{
+    output$call <- match.call()
+    output$method <- "lsirm2pl"
+    output$missing <- missing_data
+    output$varselect <- spikenslab
+    class(output) <- "lsirm"
+    output$chains = 1
+  }
+  return(output)
+}
+
+
+
+

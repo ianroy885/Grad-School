@@ -1,0 +1,179 @@
+#' 2PL LSIRM.
+#'
+#' @description \link{lsirm2pl_o} is used to fit 2PL LSIRM.
+#' \link{lsirm2pl_o} factorizes item response matrix into column-wise item effect, row-wise respondent effect and further embeds interaction effect in a latent space. Unlike 1PL model, 2PL model assumes the item effect can vary according to respondent, allowing additional parameter multiplied with respondent effect. The resulting latent space provides an interaction map that represents interactions between respondents and items.
+#'
+#' @inheritParams lsirm2pl
+#' @param jump_gamma Numeric; the jumping rule for the gamma proposal density. Default is 0.2.
+#' @param pr_mean_gamma Numeric; mean of log normal prior for gamma. Default is 0.5.
+#' @param pr_sd_gamma Numeric; standard deviation of log normal prior for gamma. Default is 1.
+#' @param verbose Logical; If TRUE, MCMC samples are printed for each \code{nprint}. Default is FALSE.
+#' @param adapt List; optional adaptive MCMC control. If not \code{NULL}, proposal standard deviations are adapted during the burn-in period to reach a target acceptance rate and are held fixed during the main MCMC sampling.
+#'   When adaptation is enabled, the reported acceptance ratios in the output (\code{accept_beta}, \code{accept_theta}, \code{accept_alpha}, etc.) are computed only from iterations after burn-in, reflecting the performance of the adapted proposal distributions.
+#'   Elements of the list can include:
+#'   \itemize{
+#'     \item \code{use_adapt}: Logical; if \code{TRUE}, adaptive MCMC is used. Default is \code{FALSE}.
+#'     \item \code{adapt_interval}: Integer; the number of iterations between each update of the proposal SDs. Default is \code{100}.
+#'     \item \code{adapt_rate}: Numeric; Robbins-Monro scaling constant (c) in step size formula: adapt_rate / iteration^decay_rate. Default is \code{1.0}. Valid range: any positive value. Recommended: 0.5-2.0.
+#'     \item \code{decay_rate}: Numeric; Robbins-Monro decay exponent (alpha) in step size formula. Default is \code{0.5}. Valid range: (0.5, 1]. Recommended: 0.5-0.8.
+#'     \item \code{target_accept}: Numeric; target acceptance rate for scalar parameters (beta, theta, gamma, alpha). Default is \code{0.44}.
+#'     \item \code{target_accept_zw}: Numeric; target acceptance rate for multi-dimensional latent positions z and w. Default is \code{0.234}.
+#'     \item \code{target_accept_beta/theta/alpha/gamma}: Numeric; (optional) parameter-specific target acceptance rates to override \code{target_accept}.
+#'   }
+#'
+#' @return \code{lsirm2pl_o} returns an object of  list containing the following components:
+#'  \item{data}{Data frame or matrix containing the variables used in the model.}
+#' \item{bic}{A numeric value representing the Bayesian Information Criterion (BIC).}
+#' \item{mcmc_inf}{Details about the number of MCMC iterations, burn-in periods, and thinning intervals.}
+#' \item{map_inf}{The log maximum a posteriori (MAP) value and the iteration number at which this MAP value occurs.}
+#' \item{beta_estimate}{Posterior estimates of the beta parameter.}
+#' \item{theta_estimate}{Posterior estimates of the theta parameter.}
+#' \item{sigma_theta_estimate}{Posterior estimates of the standard deviation of theta.}
+#' \item{gamma_estimate}{Posterior estimates of gamma parameter.}
+#' \item{z_estimate}{Posterior estimates of the z parameter.}
+#' \item{w_estimate}{Posterior estimates of the w parameter.}
+#' \item{beta}{Posterior samples of the beta parameter.}
+#' \item{theta}{Posterior samples of the theta parameter.}
+#' \item{theta_sd}{Posterior samples of the standard deviation of theta.}
+#' \item{gamma}{Posterior samples of the gamma parameter.}
+#' \item{z}{Posterior samples of the z parameter, represented as a 3-dimensional matrix where the last axis denotes the dimension of the latent space.}
+#' \item{w}{Posterior samples of the w parameter, represented as a 3-dimensional matrix where the last axis denotes the dimension of the latent space.}
+#' \item{z_raw}{Posterior samples of the z parameter without procrustes matching.}
+#' \item{w_raw}{Posterior samples of the w parameter without procrustes matching.}
+#' \item{accept_beta}{Acceptance ratio for the beta parameter.}
+#' \item{accept_theta}{Acceptance ratio for the theta parameter.}
+#' \item{accept_z}{Acceptance ratio for the z parameter.}
+#' \item{accept_w}{Acceptance ratio for the w parameter.}
+#' \item{accept_gamma}{Acceptance ratio for the gamma parameter.}
+#' \item{alpha_estimate}{Posterior estimates of the alpha parameter.}
+#'  \item{alpha}{Posterior estimates of the alpha parameter.}
+#'  \item{accept_alpha}{Acceptance ratio for the alpha parameter.}
+#'
+#' @details \code{lsirm2pl_o} models the probability of correct response by respondent \eqn{j} to item \eqn{i} with item effect \eqn{\beta_i}, respondent effect \eqn{\theta_j} and the distance between latent position \eqn{w_i} of item \eqn{i} and latent position \eqn{z_j} of respondent \eqn{j} in the shared metric space, with \eqn{\gamma} represents the weight of the distance term. For 2pl model, the the item effect is assumed to have additional discrimination parameter \eqn{\alpha_i} multiplied by \eqn{\theta_j}: \deqn{logit(P(Y_{j,i} = 1|\theta_j,\alpha_i,\beta_i,\gamma,z_j,w_i))=\theta_j*\alpha_i+\beta_i-\gamma||z_j-w_i||}
+#'
+#' @examples
+#' \donttest{
+#' # generate example item response matrix
+#' data     <- matrix(rbinom(500, size = 1, prob = 0.5),ncol=10,nrow=50)
+#'
+#' lsirm_result <- lsirm2pl_o(data)
+#'
+#' # The code following can achieve the same result.
+#' lsirm_result <- lsirm(data ~ lsirm2pl(spikenslab = FALSE, fixed_gamma = FALSE))
+#' }
+#' @export
+lsirm2pl_o = function(data, ndim = 2, niter = 15000, nburn = 2500, nthin = 5, nprint = 500,
+                      jump_beta = 0.4, jump_theta = 1, jump_alpha = 1, jump_gamma = 0.2, jump_z = 0.5, jump_w = 0.5,
+                      pr_mean_beta = 0, pr_sd_beta = 1, pr_mean_theta = 0, pr_sd_theta = 1, pr_mean_gamma = 0.5, pr_sd_gamma = 1,
+                      pr_mean_alpha = 0.5, pr_sd_alpha = 1, pr_a_theta = 0.001, pr_b_theta = 0.001, verbose=FALSE, fix_theta_sd=FALSE, fix_alpha_1=TRUE,
+                      adapt = NULL){
+  if(niter < nburn){
+    stop("niter must be greater than burn-in process.")
+  }
+  if(is.data.frame(data)){
+    cname = colnames(data)
+  }else{
+    cname = paste("item", 1:ncol(data), sep=" ")
+  }
+
+  # cat("\n\nFitting with MCMC algorithm\n")
+
+
+  output <- lsirm2pl_cpp(data=as.matrix(data), ndim=ndim, niter=niter, nburn=nburn, nthin=nthin, nprint=nprint,
+                         jump_beta=jump_beta, jump_theta=jump_theta, jump_alpha=jump_alpha, jump_gamma=jump_gamma, jump_z=jump_z, jump_w=jump_w,
+                         pr_mean_beta=pr_mean_beta, pr_sd_beta=pr_sd_beta, pr_mean_theta=pr_mean_theta, pr_sd_theta=pr_sd_theta,
+                         pr_mean_gamma=pr_mean_gamma, pr_sd_gamma=pr_sd_gamma,
+                         pr_mean_alpha=pr_mean_alpha, pr_sd_alpha=pr_sd_alpha, pr_a_theta=pr_a_theta, pr_b_theta=pr_b_theta, verbose=verbose, fix_theta_sd=fix_theta_sd, fix_alpha_1=fix_alpha_1,
+                         adapt=adapt)
+
+  mcmc.inf = list(nburn=nburn, niter=niter, nthin=nthin)
+  nsample <- nrow(data)
+  nitem <- ncol(data)
+
+  nmcmc = as.integer((niter - nburn) / nthin)
+  max.address = min(which.max(output$map))
+  map.inf = data.frame(value = output$map[which.max(output$map)], iter = which.max(output$map))
+  w.star = output$w[max.address,,]
+  z.star = output$z[max.address,,]
+  w.proc = array(0,dim=c(nmcmc,nitem,ndim))
+  z.proc = array(0,dim=c(nmcmc,nsample,ndim))
+
+  # cat("\n\nProcrustes Matching Analysis\n")
+cat("\n")
+
+  for(iter in 1:nmcmc){
+    z.iter = output$z[iter,,]
+    w.iter = output$w[iter,,]
+
+    if(ndim == 1){
+      z.iter = as.matrix(z.iter)
+      w.iter = as.matrix(w.iter)
+      z.star = as.matrix(z.star)
+      w.star = as.matrix(w.star)
+    }
+
+    if(iter != max.address) z.proc[iter,,] = procrustes(z.iter,z.star)$X.new
+    else z.proc[iter,,] = z.iter
+
+    if(iter != max.address) w.proc[iter,,] = procrustes(w.iter,w.star)$X.new
+    else w.proc[iter,,] = w.iter
+  }
+
+  w.est = colMeans(w.proc, dims = 1)
+  z.est = colMeans(z.proc, dims = 1)
+
+  beta.estimate = apply(output$beta, 2, mean)
+  theta.estimate = apply(output$theta, 2, mean)
+  alpha.estimate = apply(output$alpha, 2, mean)
+  sigma_theta.estimate = mean(output$sigma_theta)
+  gamma.estimate = mean(output$gamma)
+
+  beta.summary = data.frame(cbind(apply(output$beta, 2, mean), t(apply(output$beta, 2, function(x) quantile(x, probs = c(0.025, 0.975))))))
+  colnames(beta.summary) <- c("Estimate", "2.5%", "97.5%")
+  rownames(beta.summary) <- cname
+
+  # Calculate BIC
+  # cat("\n\nCalculate BIC\n")
+  log_like = log_likelihood_2pl_cpp(as.matrix(data), ndim, as.matrix(beta.estimate), as.matrix(alpha.estimate), as.matrix(theta.estimate), gamma.estimate, z.est, w.est, 99)
+  p = 2 * nitem + nsample + 1 + 1 + ndim * nitem + ndim * nsample
+  bic = -2 * log_like[[1]] + p * log(nsample * nitem)
+
+  result <- list(data = data,
+              bic = bic,
+                 mcmc_inf = mcmc.inf,
+                 map_inf = map.inf,
+                 beta_estimate  = beta.estimate,
+                 beta_summary = beta.summary,
+                 theta_estimate = theta.estimate,
+                 sigma_theta_estimate    = sigma_theta.estimate,
+                 gamma_estimate = gamma.estimate,
+                 alpha_estimate = alpha.estimate,
+                 z_estimate     = z.est,
+                 w_estimate     = w.est,
+                 beta           = output$beta,
+                 theta          = output$theta,
+                 theta_sd       = output$sigma_theta,
+                 gamma          = output$gamma,
+                 alpha          = output$alpha,
+                 z              = z.proc,
+                 w              = w.proc,
+                 z_raw          = output$z,
+                 w_raw          = output$w,
+                 tuning         = output$tuning,
+                 accept_beta    = output$accept_beta,
+                 accept_theta   = output$accept_theta,
+                 accept_w       = output$accept_w,
+                 accept_z       = output$accept_z,
+                 accept_gamma   = output$accept_gamma,
+                 accept_alpha   = output$accept_alpha)
+
+  result$call <- match.call()
+  result$method <- "lsirm2pl"
+  result$dtype <- "binary"
+  result$chains <- 1
+  result$varselect <- FALSE
+  result$fixed_gamma <- FALSE
+  class(result) = "lsirm"
+
+  return(result)
+}
