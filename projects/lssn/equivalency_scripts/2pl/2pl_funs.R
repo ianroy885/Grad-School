@@ -66,17 +66,9 @@ theta_likelihood <- function(input_data, alpha, beta, theta){
   
 }
 
-# so i have a vector of n ability log likelihoods, but i am unsure on how best to proceed. so plan on learning more about optimization first before i continue
-
-
-
-
-
-
-
-
-
-
+######################
+# Up to date version # 
+######################
 
 # define model
 twopl <- function(theta, beta, alpha){
@@ -84,12 +76,7 @@ twopl <- function(theta, beta, alpha){
     1 / (1 + exp(-alpha * (theta - beta)))
 }
 
-twopl_vectorized <- Vectorize(
-  function(theta, beta, alpha){
-  
-  1 / (1 + exp(-alpha * (theta - beta)))
-  }, c('alpha','beta')
-)
+twopl_vectorized <- Vectorize(twopl, c('alpha','beta'))
 
 ll_bern_item <- function(X_j, params, theta){
   
@@ -99,10 +86,18 @@ ll_bern_item <- function(X_j, params, theta){
   # returns vector of probabilities for each person endorsing an item to use for LL
   p <- twopl(theta, beta, alpha)
   
+  # constrain it to avoid log(0) or log(1)
+  p[p==0] <- 1e-10
+  p[p==1] <- 1 - 1e-10
+  
   ### now need to get LL(P|X)
   
   # bernoulli -LL
   ll_item <- -sum(X_j * log(p) - X_j * log(1-p) + 1)
+
+  if (is.nan(ll_item)|is.infinite(ll_item)){
+    browser()
+  }
   
   return(ll_item)
   
@@ -110,19 +105,20 @@ ll_bern_item <- function(X_j, params, theta){
 
 ll_bern_theta <- function(X_i, alpha, beta, theta){
   
-  # returns vector of probabilities for one person endorsing each item to use for LL - wait but this is returning 200 probs
+  # returns vector of probabilities for one person endorsing each item to use for LL
   p <- twopl(theta, beta, alpha)
   
-  # constrain p 
-  p <- pmin(pmax(p,1e-10),1-1e-10)
+  # constrain it to avoid log(0) or log(1)
+  p[p==0] <- 1e-10
+  p[p==1] <- 1 - 1e-10
   
   ### now need to get LL(P|X) for one person
   
   # bernoulli -LL
   ll_thetas <- -sum(X_i * log(p) - X_i * log(1-p) + 1)
   
-  if(is.nan(ll_thetas | is.infinite(ll_thetas))){
-    cat("bad p:", p, "ll:",ll_thetas,"\n")
+  if (is.nan(ll_thetas)|is.infinite(ll_thetas)){
+    browser()
   }
   
   return(ll_thetas)
@@ -151,7 +147,7 @@ ll_bern_theta <- function(X_i, alpha, beta, theta){
 }
 
 get_params <- function(input_data, max_iter = 500, tolerance = 1e-6){
-  
+ 
   # get base stuff
   n <- nrow(input_data)
   k <- ncol(input_data)
@@ -164,50 +160,50 @@ get_params <- function(input_data, max_iter = 500, tolerance = 1e-6){
   delta <- 1
   
   for (iter in 1:max_iter){
-  
+    
+    alpha_old <- alphas
+    beta_old <- betas
+    
     # start optimization loop 
-    for (i in 1:k){
-      
-      beta_old <- betas
-      alpha_old <- alphas
-      
+    for (j in 1:k){
+      # browser()
+
       # get estimates for alpha and beta
       model_params <- optim(
-        par = c(alpha_old[k], beta_old[k]), # want to grab the alpas and betas for that item
+        par = c(alphas[j], betas[j]), # want to grab the alpas and betas for that item
         fn = ll_bern_item, # minimize log likelihood
-        X_j = input_data[,k], # one item at a time
+        X_j = input_data[,j], # one item at a time
         theta = thetas,
         method = "BFGS",
-        control = list(maxit = 200)
+        control = list(maxit = 1000)
       )
       
       # grab updated alpha and beta params
-      alphas[k] <- model_params$par[1]
-      betas[k] <- model_params$par[2]
-      
+      alphas[j] <- model_params$par[1]
+      betas[j] <- model_params$par[2]
+ 
     }
     
     # use updated params to get better estimate of theta
     # i.e. get new P(theta or p|X)
     
     theta_old <- thetas
-    thetas <- rep(NA, n)
     
     for (i in 1:n){
       
       thetas[i] <- optim(
-        par = theta_old[i], # want to grab the thetas
-        fn = ll_bern_theta, # minimize log likelihood
+        par = thetas[i], # want to grab the thetas
+        fn = ll_bern_theta, # minimize -log likelihood
         X = input_data[i,], # one person at a time
         alpha = alphas,
         beta = betas,
         method = "BFGS",
-        control = list(maxit = 200)
+        control = list(maxit = 1000)
       )$par[1]
     }
     
     delta <- max(c((alphas - alpha_old),(betas - beta_old)))
-    print(delta)
+    
     
     if (delta < tolerance) break
     
@@ -218,7 +214,4 @@ get_params <- function(input_data, max_iter = 500, tolerance = 1e-6){
   
 }
 
-finally <- get_params(sim_data)
-
-
-finally$theta
+# finally <- get_params(sim_data)
