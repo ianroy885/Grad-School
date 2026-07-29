@@ -5,80 +5,22 @@
 # Step 3: Get the params
 # Step 4: 
 
-
-################ Look into gaussian quadrature for estimation
-
-# define model
-twopl <- Vectorize(
-  
-  function(theta, beta, alpha){
-    
-    1 / (1 + exp(-alpha * (theta - beta)))
-    
-  }, c('alpha','beta')
-)
-
-# likelihood fun of bernoulli
-log_likelihood_bern <- #Vectorize(
-  function(k,p){
-  
-  k * log(p) - k * log(1-p) + 1 # not doing any sums since we are looking at one success/failure at a time
-  
-  }#, 'k'
-#)
-
-# finding likelihood of theta | data
-theta_likelihood <- function(input_data, alpha, beta, theta){
-  
-  num_items <- ncol(input_data)
-  num_people <- nrow(input_data)
-
-  
-  # finding probability of endorsement given data
-  p_endorse <- twopl(
-    theta = theta, 
-    alpha = alpha,
-    beta = beta
-  )
-  
-  
-  # initialize results storage
-  ll_abilities_matrix <- matrix(nrow = num_people, ncol = num_items)
-  ll_abilities_vector <- matrix(nrow = num_people, ncol = 1)
-  
-  for (k in 1:num_people){
-    
-    # grab the ith person
-    current_person <- input_data[k,]
-    
-    for (p in 1:num_items){
-      
-      # individual log likelihood of single response given the prob
-      ll_abilities_matrix[k,p] <- k * log(p_endorse[k,p]) - k * log(1-p_endorse[k,p]) + 1
-      
-    }
-    
-    # compute actual log likelihood by summing across individual ones per item
-    ll_abilities_vector[k,1] <- sum(ll_abilities_matrix[k,])
-    
-  }
-
-  return(ll_abilities_vector)
-  
-  
-}
+########## mirt package utilizes fixed quadrature EM for exploratory models and 
+# Metropolis Hastings Robbins Monro method for exploratory, confirmatory, and polytomous models
 
 ######################
 # Up to date version # 
 ######################
 
 # define model
-twopl <- function(theta, beta, alpha){
+m_twopl <- function(theta, beta, alpha){
     
-    1 / (1 + exp(-alpha * (theta - beta)))
+  model <- t(alpha) %*% theta - beta # expanding to fit x amount of latent traits
+  
+  1 / (1 + exp(-model))
 }
 
-twopl_vectorized <- Vectorize(twopl, c('alpha','beta'))
+m_twopl_vectorized <- Vectorize(m_twopl, c('alpha','beta'))
 
 ll_bern_item <- function(X_j, params, theta){
   
@@ -86,7 +28,7 @@ ll_bern_item <- function(X_j, params, theta){
   beta <- params[2]
   
   # returns vector of probabilities for each person endorsing an item to use for LL
-  p <- twopl(theta, beta, alpha)
+  p <- m_twopl(theta, beta, alpha)
   
   # constrain it to avoid log(0) or log(1)
   p[p==0] <- 1e-10
@@ -108,7 +50,7 @@ ll_bern_item <- function(X_j, params, theta){
 ll_bern_theta <- function(X_i, alpha, beta, theta){
   
   # returns vector of probabilities for one person endorsing each item to use for LL
-  p <- twopl(theta, beta, alpha)
+  p <- m_twopl(theta, beta, alpha)
   
   # constrain it to avoid log(0) or log(1)
   p[p==0] <- 1e-10
@@ -126,7 +68,7 @@ ll_bern_theta <- function(X_i, alpha, beta, theta){
   return(ll_thetas)
   
   # # returns matrix of probabilities for each person endorsing an item to use for LL
-  # p <- twopl_vectorized(theta, beta, alpha)
+  # p <- m_twopl_vectorized(theta, beta, alpha)
   
   # # initialize empty LL matrix
   # ll_mat <- matrix(nrow = nrow(X), ncol = ncol(X))
