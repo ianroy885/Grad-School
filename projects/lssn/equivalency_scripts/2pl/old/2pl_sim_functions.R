@@ -54,7 +54,7 @@ ll_item <- function(params, x_i, theta){
 }
 
 
-estimate_2pl <- function(X, tol=1e-6, maxit=50){
+estimate_2pl <- function(X, tol=1e-6, maxit=100){
   
   # browser()
   
