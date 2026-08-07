@@ -1,6 +1,6 @@
 # functions for the 2pl
 
-# 2PL model for endorsing an item
+# 2PL model for endorsing an item - alter this to get to lssn
 p2pl <- function(theta, a, b){
   
   1 / (1 + exp(-a * (theta - b)))
@@ -40,7 +40,7 @@ log_lik <- function(a, b, theta, X){
 
 # alternate version for one item at time
 ll_item <- function(params, x_i, theta){
-  a <- exp(params[1])
+  a <- exp(params[1])#params[1]
   b <- params[2]
   p <- p2pl(theta,a,b)
   p <- pmin(pmax(p,1e-10),1-1e-10)
@@ -82,7 +82,7 @@ estimate_2pl <- function(X, tol=1e-6, maxit=100){
         fn = ll_item,
         x_i = X[, item],
         theta = theta,
-        method = "BFGS",
+        method = "BFGS", # waht is the optimization functin
         control = list(maxit = 200)
       )
       
