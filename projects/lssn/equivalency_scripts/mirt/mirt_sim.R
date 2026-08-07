@@ -10,7 +10,7 @@ difficulties <- rnorm(items, 0, 1)
 discrims <- rnorm(items, 0, 1)
 
 # get prob of endorsement for each item, person
-p_endorse <- twopl_vectorized(abilities, difficulties, discrims)
+p_endorse <- m_twopl_vectorized(abilities, difficulties, discrims)
 
 # generate data with bernoulli
 sim_data <- apply(p_endorse, 2, function(x){
